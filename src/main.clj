@@ -114,6 +114,15 @@
       (assoc :cursor {:x 0 :y (inc y) :col 0})
       set-anchor-from-cursor))
 
+(defn start-insert-above [state]
+  (-> state
+      start-insert
+      (assoc-in [:cursor :x] 0)
+      set-cursor-col-from-x
+      insert-newline
+      move-up
+      set-anchor-from-cursor))
+
 (defn insert-backspace [{text :text {x :x y :y} :cursor :as state}]
   (cond
     (and (zero? x) (zero? y)) state
@@ -136,6 +145,20 @@
               (update-in [:cursor :x] dec)
               set-cursor-col-from-x
               set-anchor-from-cursor)))
+
+(defn insert-delete [{text :text {x :x y :y} :cursor :as state}]
+  (cond
+    (and (= (count (text y)) x) (= (dec (count text)) y)) state
+    (= (count (text y)) x) (update state
+                                   :text
+                                   #(vec (concat (subvec % 0 y)
+                                                 [(str (% y) (% (inc y)))]
+                                                 (subvec % (+ y 2)))))
+    :else (update state
+                  :text
+                  #(vec (concat (subvec % 0 y)
+                                [(str (subs (% y) 0 x) (subs (% y) (inc x)))]
+                                (subvec % (inc y)))))))
 
 (defn snapshot [state]
   (select-keys state [:text :cursor :anchor]))
@@ -229,7 +252,7 @@
         \l (-> state move-right set-anchor-from-cursor)
         \L (move-right state)
         \f (-> state start-change delete start-insert)
-        \F (-> state start-change delete-lines start-insert)
+        \F (-> state start-change delete-lines start-insert-above)
         \d (-> state start-change delete stop-change)
         \D (-> state start-change delete-lines stop-change)
         \z (undo state)
@@ -253,6 +276,7 @@
       KeyType/Escape (-> state stop-insert stop-change)
       KeyType/Enter (insert-newline state)
       KeyType/Backspace (insert-backspace state)
+      KeyType/Delete (insert-delete state)
       KeyType/Character (insert state (.getCharacter input))
       state)
 
@@ -271,17 +295,22 @@
          (or (< y (:y to)) (and (= y (:y to)) (< x (:x to)))))))
 
 (defn draw-editor [{:keys [text cursor] :as state} screen w h]
-  (let [y-offset (clamp (- (:y cursor) (int (/ h 2)))
+  (let [x-offset (clamp (- (:x cursor) (int (/ w 2)))
+                        0 (- (inc (count (text (:y cursor)))) w))
+        y-offset (clamp (- (:y cursor) (int (/ h 2)))
                         0 (- (count text) h))
-        text (->> text (drop y-offset) (take h) (map #(take w %)))]
+        text (->> text
+                  (drop y-offset)
+                  (take h)
+                  (map #(->> % (drop x-offset) (take w))))]
     (doseq [[y line] (zipmap (range) text)]
       (doseq [[x char] (zipmap (range) (concat line " "))]
         (.setCharacter screen
                        x y
                        (cond-> (TextCharacter. char)
-                         (in-selection? state x (+ y y-offset))
+                         (in-selection? state (+ x x-offset) (+ y y-offset))
                          (.withBackgroundColor TextColor$ANSI/WHITE)))))
-    (.setCursorPosition screen (TerminalPosition. (:x cursor)
+    (.setCursorPosition screen (TerminalPosition. (- (:x cursor) x-offset)
                                                   (- (:y cursor) y-offset)))))
 
 (defn pad-between [left right w]
