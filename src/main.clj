@@ -88,7 +88,9 @@
 
 (defn stop-insert [state]
   (set-cursor-style 1)
-  (assoc state :mode :normal))
+  (assoc state
+         :mode :normal
+         :pending-close-delims []))
 
 (defn start-space [state]
   (assoc state :mode :space))
@@ -96,12 +98,36 @@
 (defn stop-space [state]
   (assoc state :mode :normal))
 
+(def delims
+  {\( \) \[ \] \{ \} \" \"})
+
+(def open-delim?
+  (set (keys delims)))
+
 (defn insert [{{x :x y :y} :cursor :as state} char]
-  (-> state
+  (cond
+    (open-delim? char)
+    (let [close (delims char)]
+      (-> state
+        (update-in [:text y] #(str (subs % 0 x) char close (subs % x)))
+        (update-in [:cursor :x] inc)
+        set-cursor-col-from-x
+        set-anchor-from-cursor
+        (update :pending-close-delims conj close)))
+
+    (= char (-> state :pending-close-delims peek))
+    (-> state
+      (update-in [:cursor :x] inc)
+      set-cursor-col-from-x
+      set-anchor-from-cursor
+      (update :pending-close-delims pop))
+
+    :else
+    (-> state
       (update-in [:text y] #(str (subs % 0 x) char (subs % x)))
       (update-in [:cursor :x] inc)
       set-cursor-col-from-x
-      set-anchor-from-cursor))
+      set-anchor-from-cursor)))
 
 (defn insert-newline [{{x :x y :y} :cursor :as state}]
   (-> state
@@ -189,10 +215,19 @@
         (update :past conj change))
     state))
 
+;; TODO try shelling out to pbcopy/pbpaste instead of using this java interface
+;; to avoid the weird focus stealing.
 (defn write-clipboard [s]
   (-> (Toolkit/getDefaultToolkit)
       .getSystemClipboard
       (.setContents (StringSelection. s) (StringSelection. ""))))
+
+(defn read-clipboard []
+  (let [clipboard (.getSystemClipboard (Toolkit/getDefaultToolkit))
+        flavor (DataFlavor/selectBestTextFlavor
+                (.getAvailableDataFlavors clipboard))]
+    (with-open [r (.getReaderForText flavor (.getContents clipboard nil))]
+      (slurp r))))
 
 (defn copy [{text :text :as state}]
   (let [[from to] (selection state)]
@@ -208,13 +243,6 @@
   (let [[from to] (map :y (selection state))]
     (write-clipboard (str (str/join "\n" (subvec text from (inc to))) "\n")))
   state)
-
-(defn read-clipboard []
-  (let [clipboard (.getSystemClipboard (Toolkit/getDefaultToolkit))
-        flavor (DataFlavor/selectBestTextFlavor
-                (.getAvailableDataFlavors clipboard))]
-    (with-open [r (.getReaderForText flavor (.getContents clipboard nil))]
-      (slurp r))))
 
 (defn paste [{{x :x y :y} :cursor :as state}]
   (let [clip (str/split (read-clipboard) #"\n" -1)]
@@ -348,7 +376,8 @@
    :mode :normal
    :past []
    :future []
-   :dirty? false})
+   :dirty? false
+   :pending-close-delims []})
 
 (defn main [_]
   (with-open [screen (.createScreen (DefaultTerminalFactory.))]
