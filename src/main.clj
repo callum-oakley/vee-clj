@@ -2,7 +2,7 @@
   (:require
    [clojure.string :as str])
   (:import
-   [java.awt Toolkit datatransfer.StringSelection]
+   [java.awt Toolkit datatransfer.StringSelection datatransfer.DataFlavor]
    [com.googlecode.lanterna
     TextCharacter
     TerminalPosition
@@ -84,9 +84,7 @@
 
 (defn start-insert [state]
   (set-cursor-style 3)
-  (-> state
-      delete
-      (assoc :mode :insert)))
+  (assoc state :mode :insert))
 
 (defn stop-insert [state]
   (set-cursor-style 1)
@@ -160,44 +158,76 @@
         (update :past conj change))
     state))
 
-; (defn read-clipboard []
-;   (with-open [r (-> (Toolkit/getDefaultToolkit)
-;                     .getSystemClipboard
-;                     DataFlavor/getReaderForText.)]
-;     (slurp r)))
-
 (defn write-clipboard [s]
   (-> (Toolkit/getDefaultToolkit)
       .getSystemClipboard
       (.setContents (StringSelection. s) (StringSelection. ""))))
 
-(defn copy [{text :text {x :x y :y} :cursor :as state}]
+(defn copy [{text :text :as state}]
   (let [[from to] (selection state)]
-    ;; TODO multi line
-    (write-clipboard (subs (text y) (:x from) (:x to))))
+    (write-clipboard
+     (if (= (:y from) (:y to))
+       (subs (text (:y from)) (:x from) (:x to))
+       (str/join "\n" (concat [(subs (text (:y from)) (:x from))]
+                              (subvec text (inc (:y from)) (:y to))
+                              [(subs (text (:y to)) 0 (:x to))])))))
   state)
+
+(defn copy-lines [{text :text :as state}]
+  (let [[from to] (map :y (selection state))]
+    (write-clipboard (str (str/join "\n" (subvec text from (inc to))) "\n")))
+  state)
+
+(defn read-clipboard []
+  (let [clipboard (.getSystemClipboard (Toolkit/getDefaultToolkit))
+        flavor (DataFlavor/selectBestTextFlavor
+                (.getAvailableDataFlavors clipboard))]
+    (with-open [r (.getReaderForText flavor (.getContents clipboard nil))]
+      (slurp r))))
+
+(defn paste [{{x :x y :y} :cursor :as state}]
+  (let [clip (str/split (read-clipboard) #"\n" -1)]
+    (update state
+            :text
+            #(vec (concat (subvec % 0 y)
+                          (if (= 1 (count clip))
+                            [(str (subs (% y) 0 x) (first clip) (subs (% y) x))]
+                            (concat [(str (subs (% y) 0 x) (first clip))]
+                                    (drop-last (rest clip))
+                                    [(str (last clip) (subs (% y) x))]))
+                          (subvec % (inc y)))))))
+
+(defn paste-lines [{{y :y} :cursor :as state}]
+  (let [clip (str/split-lines (read-clipboard))]
+    (update state :text #(vec (concat (subvec % 0 y) clip (subvec % y))))))
 
 (defn handle-input [state input]
   (case (:mode state)
     :normal
     (condp = (.getKeyType input)
       KeyType/Escape (set-anchor-from-cursor state)
-      KeyType/Character (case (.getCharacter input)
-                          \h (-> state move-left set-anchor-from-cursor)
-                          \j (-> state move-down set-anchor-from-cursor)
-                          \k (-> state move-up set-anchor-from-cursor)
-                          \l (-> state move-right set-anchor-from-cursor)
-                          \H (move-left state)
-                          \J (move-down state)
-                          \K (move-up state)
-                          \L (move-right state)
-                          \f (-> state start-change start-insert)
-                          \d (-> state start-change delete stop-change)
-                          \D (-> state start-change delete-lines stop-change)
-                          \z (undo state)
-                          \Z (redo state)
-                          \c (copy state)
-                          state)
+      KeyType/Character
+      (case (.getCharacter input)
+        \h (-> state move-left set-anchor-from-cursor)
+        \j (-> state move-down set-anchor-from-cursor)
+        \k (-> state move-up set-anchor-from-cursor)
+        \l (-> state move-right set-anchor-from-cursor)
+        \H (move-left state)
+        \J (move-down state)
+        \K (move-up state)
+        \L (move-right state)
+        \f (-> state start-change delete start-insert)
+        \d (-> state start-change delete stop-change)
+        \D (-> state start-change delete-lines stop-change)
+        \z (undo state)
+        \Z (redo state)
+        \x (-> state start-change copy delete stop-change)
+        \X (-> state start-change copy-lines delete-lines stop-change)
+        \c (copy state)
+        \C (copy-lines state)
+        \v (-> state start-change delete paste stop-change)
+        \V (-> state start-change delete-lines paste-lines stop-change)
+        state)
       state)
 
     :insert
@@ -217,10 +247,10 @@
     (and (or (< (:y from) y) (and (= (:y from) y) (<= (:x from) x)))
          (or (< y (:y to)) (and (= y (:y to)) (< x (:x to)))))))
 
-(defn draw-editor [state screen w h]
-  (let [y-offset (clamp (-> state :cursor :y (- (int (/ h 2))))
-                        0 (-> state :text count (- h)))
-        text (->> state :text (drop y-offset) (take h) (map #(take w %)))]
+(defn draw-editor [{:keys [text cursor] :as state} screen w h]
+  (let [y-offset (clamp (- (:y cursor) (int (/ h 2)))
+                        0 (- (count text) h))
+        text (->> text (drop y-offset) (take h) (map #(take w %)))]
     (doseq [[y line] (zipmap (range) text)]
       (doseq [[x char] (zipmap (range) (concat line " "))]
         (.setCharacter screen
@@ -228,25 +258,22 @@
                        (cond-> (TextCharacter. char)
                          (in-selection? state x (+ y y-offset))
                          (.withBackgroundColor TextColor$ANSI/WHITE)))))
-    (.setCursorPosition screen (TerminalPosition.
-                                (-> state :cursor :x)
-                                (-> state :cursor :y (- y-offset))))))
+    (.setCursorPosition screen (TerminalPosition. (:x cursor)
+                                                  (- (:y cursor) y-offset)))))
 
 (defn pad-between [left right w]
   (str left (apply str (repeat (- w (count left) (count right)) \space)) right))
 
-(defn draw-status [state screen w y]
-  (doseq [[x char] (zipmap (range)
-                           (pad-between (:file-path state)
-                                        (str (-> state :cursor :x inc)
-                                             ","
-                                             (-> state :cursor :y inc))
-                                        w))]
-    (.setCharacter screen
-                   x y
-                   (-> (TextCharacter. char)
-                     (.withBackgroundColor TextColor$ANSI/WHITE))))
-  (doseq [[x char] (zipmap (range) (-> state :mode name))]
+(defn draw-status [{:keys [file-path cursor mode]} screen w y]
+  (let [status (pad-between file-path
+                            (str (-> cursor :x inc) "," (-> cursor :y inc))
+                            w)]
+    (doseq [[x char] (zipmap (range) status)]
+      (.setCharacter screen
+                     x y
+                     (-> (TextCharacter. char)
+                         (.withBackgroundColor TextColor$ANSI/WHITE)))))
+  (doseq [[x char] (zipmap (range) (name mode))]
     (.setCharacter screen x (inc y) (TextCharacter. char))))
 
 (defn draw [state screen]
@@ -272,8 +299,7 @@
 
 (defn main [_]
   (with-open [screen (.createScreen (DefaultTerminalFactory.))]
-    ;; TODO probably want to addResizeListener. Might not need the COMPLETE /
-    ;; DELTA dance if I redraw on resize.
+    ;; TODO probably want to addResizeListener to redraw on resize
     (.startScreen screen)
     (loop [state (initial-state (last *command-line-args*))]
       (draw state screen)
