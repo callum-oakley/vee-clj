@@ -2,6 +2,7 @@
   (:require
    [clojure.string :as str])
   (:import
+   [java.awt Toolkit datatransfer.StringSelection]
    [com.googlecode.lanterna
     TextCharacter
     TerminalPosition
@@ -10,23 +11,18 @@
     input.KeyType
     terminal.DefaultTerminalFactory]))
 
-;; TODO we often want to get lines other than the current one. Have this take a
-;; y and it will be more useful. Replace all the "get-in state [:text blah]"
-(defn current-line [state]
-  (get-in state [:text (-> state :cursor :y)]))
+(defn set-cursor-col-from-x [{{x :x} :cursor :as state}]
+  (assoc-in state [:cursor :col] x))
 
-(defn set-cursor-col-from-x [state]
-  (assoc-in state [:cursor :col] (-> state :cursor :x)))
-
-(defn move-left [state]
-  (if (pos? (-> state :cursor :x))
+(defn move-left [{{x :x} :cursor :as state}]
+  (if (pos? x)
     (-> state
         (update-in [:cursor :x] dec)
         set-cursor-col-from-x)
     state))
 
-(defn move-right [state]
-  (if (<= (-> state :cursor :x inc) (-> state current-line count))
+(defn move-right [{text :text {x :x y :y} :cursor :as state}]
+  (if (<= (inc x) (count (text y)))
     (-> state
         (update-in [:cursor :x] inc)
         set-cursor-col-from-x)
@@ -35,39 +31,52 @@
 (defn clamp [x low high]
   (max low (min x high)))
 
-(defn set-cursor-x-from-col [state]
-  (assoc-in state [:cursor :x] (clamp (-> state :cursor :col)
-                                      0 (-> state current-line count))))
+(defn set-cursor-x-from-col [{text :text {col :col y :y} :cursor :as state}]
+  (assoc-in state [:cursor :x] (clamp col 0 (count (text y)))))
 
-(defn move-up [state]
-  (if (pos? (-> state :cursor :y))
+(defn move-up [{{y :y} :cursor :as state}]
+  (if (pos? y)
     (-> state
         (update-in [:cursor :y] dec)
         set-cursor-x-from-col)
     state))
 
-(defn move-down [state]
-  (if (< (-> state :cursor :y inc) (-> state :text count))
+(defn move-down [{text :text {y :y} :cursor :as state}]
+  (if (< (inc y) (count text))
     (-> state
         (update-in [:cursor :y] inc)
         set-cursor-x-from-col)
     state))
 
-(defn selection [state]
-  (sort-by (juxt :y :x) [(:cursor state) (:anchor state)]))
+(defn selection [{:keys [cursor anchor]}]
+  (sort-by (juxt :y :x) [cursor anchor]))
 
 (defn delete [state]
   (let [[from to] (selection state)]
     (-> state
-        ;; TODO lot's of unnecessary copying here. Can we use catvec from
-        ;; https://github.com/clojure/core.rrb-vector?
         (update
          :text
+        ;; Lot's of unnecessary copying here. If this turns out to be too slow,
+        ;; or use too much memory, we can try catvec from
+        ;; https://github.com/clojure/core.rrb-vector
          #(vec (concat (subvec % 0 (:y from))
-                       [(str (subs (get-in state [:text (:y from)]) 0 (:x from))
-                             (subs (get-in state [:text (:y to)]) (:x to)))]
+                       [(str (subs (% (:y from)) 0 (:x from))
+                             (subs (% (:y to)) (:x to)))]
                        (subvec % (inc (:y to))))))
         (assoc :cursor from :anchor from))))
+
+(defn set-anchor-from-cursor [state]
+  (assoc state :anchor (:cursor state)))
+
+(defn delete-lines [{text :text :as state}]
+  (let [[from to] (map :y (selection state))]
+    (-> state
+        (update :text #(vec (concat (subvec % 0 from) (subvec % (inc to)))))
+        (assoc-in [:cursor :y] (if (= to (dec (count text)))
+                                 (dec from)
+                                 from))
+        set-cursor-x-from-col
+        set-anchor-from-cursor)))
 
 (defn set-cursor-style [n]
     ;; https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
@@ -83,9 +92,6 @@
   (set-cursor-style 1)
   (assoc state :mode :normal))
 
-(defn set-anchor-from-cursor [state]
-  (assoc state :anchor (:cursor state)))
-
 (defn insert [{{x :x y :y} :cursor :as state} char]
   (-> state
       (update-in [:text y] #(str (subs % 0 x) char (subs % x)))
@@ -98,23 +104,22 @@
       (update
        :text
        #(vec (concat (subvec % 0 y)
-                     [(subs (get-in state [:text y]) 0 x)
-                      (subs (get-in state [:text y]) x)]
+                     [(subs (% y) 0 x)
+                      (subs (% y) x)]
                      (subvec % (inc y)))))
       (assoc :cursor {:x 0 :y (inc y) :col 0})
       set-anchor-from-cursor))
 
-(defn insert-backspace [{{x :x y :y} :cursor :as state}]
+(defn insert-backspace [{text :text {x :x y :y} :cursor :as state}]
   (cond
     (and (zero? x) (zero? y)) state
     (zero? x) (-> state
                   (update
                    :text
                    #(vec (concat (subvec % 0 (dec y))
-                                 [(str (get-in state [:text (dec y)])
-                                       (get-in state [:text y]))]
+                                 [(str (% (dec y)) (% y))]
                                  (subvec % (inc y)))))
-                  (assoc :cursor {:x (count (get-in state [:text (dec y)]))
+                  (assoc :cursor {:x (count (text (dec y)))
                                   :y (dec y)})
                   set-cursor-col-from-x
                   set-anchor-from-cursor)
@@ -122,8 +127,7 @@
               (update
                :text
                #(vec (concat (subvec % 0 y)
-                             [(str (subs (get-in state [:text y]) 0 (dec x))
-                                   (subs (get-in state [:text y]) x))]
+                             [(str (subs (% y) 0 (dec x)) (subs (% y) x))]
                              (subvec % (inc y)))))
               (update-in [:cursor :x] dec)
               set-cursor-col-from-x
@@ -133,13 +137,11 @@
   (select-keys state [:text :cursor :anchor]))
 
 (defn start-change [state]
-  (assoc state :before (snapshot state)))
+  (update state :past conj {:before (snapshot state)}))
 
-(defn stop-change [state]
+(defn stop-change [{past :past :as state}]
   (-> state
-      (update :past conj {:before (:before state)
-                          :after (snapshot state)})
-      (dissoc :before)
+      (assoc-in [:past (-> past count dec) :after] (snapshot state))
       (assoc :future [])))
 
 (defn undo [state]
@@ -158,10 +160,28 @@
         (update :past conj change))
     state))
 
+; (defn read-clipboard []
+;   (with-open [r (-> (Toolkit/getDefaultToolkit)
+;                     .getSystemClipboard
+;                     DataFlavor/getReaderForText.)]
+;     (slurp r)))
+
+(defn write-clipboard [s]
+  (-> (Toolkit/getDefaultToolkit)
+      .getSystemClipboard
+      (.setContents (StringSelection. s) (StringSelection. ""))))
+
+(defn copy [{text :text {x :x y :y} :cursor :as state}]
+  (let [[from to] (selection state)]
+    ;; TODO multi line
+    (write-clipboard (subs (text y) (:x from) (:x to))))
+  state)
+
 (defn handle-input [state input]
   (case (:mode state)
     :normal
     (condp = (.getKeyType input)
+      KeyType/Escape (set-anchor-from-cursor state)
       KeyType/Character (case (.getCharacter input)
                           \h (-> state move-left set-anchor-from-cursor)
                           \j (-> state move-down set-anchor-from-cursor)
@@ -173,13 +193,19 @@
                           \L (move-right state)
                           \f (-> state start-change start-insert)
                           \d (-> state start-change delete stop-change)
+                          \D (-> state start-change delete-lines stop-change)
                           \z (undo state)
                           \Z (redo state)
+                          \c (copy state)
                           state)
       state)
 
     :insert
     (condp = (.getKeyType input)
+      KeyType/ArrowUp (-> state move-up set-anchor-from-cursor)
+      KeyType/ArrowDown (-> state move-down set-anchor-from-cursor)
+      KeyType/ArrowLeft (-> state move-left set-anchor-from-cursor)
+      KeyType/ArrowRight (-> state move-right set-anchor-from-cursor)
       KeyType/Escape (-> state stop-insert stop-change)
       KeyType/Enter (insert-newline state)
       KeyType/Backspace (insert-backspace state)
