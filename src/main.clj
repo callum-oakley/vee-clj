@@ -90,6 +90,12 @@
   (set-cursor-style 1)
   (assoc state :mode :normal))
 
+(defn start-space [state]
+  (assoc state :mode :space))
+
+(defn stop-space [state]
+  (assoc state :mode :normal))
+
 (defn insert [{{x :x y :y} :cursor :as state} char]
   (-> state
       (update-in [:text y] #(str (subs % 0 x) char (subs % x)))
@@ -201,6 +207,10 @@
   (let [clip (str/split-lines (read-clipboard))]
     (update state :text #(vec (concat (subvec % 0 y) clip (subvec % y))))))
 
+(defn save [{:keys [file-path text] :as state}]
+  (spit file-path (str (str/join "\n" text) "\n"))
+  state)
+
 (defn handle-input [state input]
   (case (:mode state)
     :normal
@@ -209,14 +219,15 @@
       KeyType/Character
       (case (.getCharacter input)
         \h (-> state move-left set-anchor-from-cursor)
-        \j (-> state move-down set-anchor-from-cursor)
-        \k (-> state move-up set-anchor-from-cursor)
-        \l (-> state move-right set-anchor-from-cursor)
         \H (move-left state)
+        \j (-> state move-down set-anchor-from-cursor)
         \J (move-down state)
+        \k (-> state move-up set-anchor-from-cursor)
         \K (move-up state)
+        \l (-> state move-right set-anchor-from-cursor)
         \L (move-right state)
         \f (-> state start-change delete start-insert)
+        \F (-> state start-change delete-lines start-insert)
         \d (-> state start-change delete stop-change)
         \D (-> state start-change delete-lines stop-change)
         \z (undo state)
@@ -227,6 +238,7 @@
         \C (copy-lines state)
         \v (-> state start-change delete paste stop-change)
         \V (-> state start-change delete-lines paste-lines stop-change)
+        \space (start-space state)
         state)
       state)
 
@@ -240,7 +252,16 @@
       KeyType/Enter (insert-newline state)
       KeyType/Backspace (insert-backspace state)
       KeyType/Character (insert state (.getCharacter input))
-      state)))
+      state)
+
+    :space
+    (condp = (.getKeyType input)
+      KeyType/Character
+      (case (.getCharacter input)
+        \q nil
+        \s (save state)
+        (stop-space state))
+      (stop-space state))))
 
 (defn in-selection? [state x y]
   (let [[from to] (selection state)]
@@ -303,4 +324,5 @@
     (.startScreen screen)
     (loop [state (initial-state (last *command-line-args*))]
       (draw state screen)
-      (recur (handle-input state (.readInput screen))))))
+      (when-let [state* (handle-input state (.readInput screen))]
+        (recur state*)))))
