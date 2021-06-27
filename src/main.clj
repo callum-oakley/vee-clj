@@ -141,7 +141,9 @@
   (select-keys state [:text :cursor :anchor]))
 
 (defn start-change [state]
-  (update state :past conj {:before (snapshot state)}))
+  (-> state
+      (update :past conj {:before (snapshot state)})
+      (assoc :dirty? true)))
 
 (defn stop-change [{past :past :as state}]
   (-> state
@@ -209,7 +211,7 @@
 
 (defn save [{:keys [file-path text] :as state}]
   (spit file-path (str (str/join "\n" text) "\n"))
-  state)
+  (assoc state :dirty? false))
 
 (defn handle-input [state input]
   (case (:mode state)
@@ -259,7 +261,7 @@
       KeyType/Character
       (case (.getCharacter input)
         \q nil
-        \s (save state)
+        \s (-> state save stop-space)
         (stop-space state))
       (stop-space state))))
 
@@ -285,8 +287,8 @@
 (defn pad-between [left right w]
   (str left (apply str (repeat (- w (count left) (count right)) \space)) right))
 
-(defn draw-status [{:keys [file-path cursor mode]} screen w y]
-  (let [status (pad-between file-path
+(defn draw-status [{:keys [file-path cursor mode dirty?]} screen w y]
+  (let [status (pad-between (str file-path (when dirty? " *"))
                             (str (-> cursor :x inc) "," (-> cursor :y inc))
                             w)]
     (doseq [[x char] (zipmap (range) status)]
@@ -316,7 +318,8 @@
    :anchor {:x 0 :y 0 :col 0}
    :mode :normal
    :past []
-   :future []})
+   :future []
+   :dirty? false})
 
 (defn main [_]
   (with-open [screen (.createScreen (DefaultTerminalFactory.))]
