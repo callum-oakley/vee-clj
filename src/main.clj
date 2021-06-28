@@ -101,8 +101,8 @@
         clamp-cursors-xs)))
 
 (defn set-cursor-style [n]
-    ;; https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
-    (println (str "\033[" n " q")))
+  ;; https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
+  (println (str "\033[" n " q")))
 
 (defn start-insert [state]
   (set-cursor-style 3)
@@ -180,7 +180,8 @@
      (inc x)
 
      (= \( (get-in text [y x]))
-     (let [first-el (re-find #"\S+" (subs (text y) (inc x)))]
+     (let [first-el (re-find #"^[a-zA-Z0-9*+!\-_'?<>=/.:]*"
+                             (subs (text y) (inc x)))]
        (if (#{"case"
               "catch"
               "cond"
@@ -214,14 +215,14 @@
               "with-open"}
             first-el)
          (+ 2 x)
-         (if (< (+ 2 (count first-el) x) (count (text y)))
+         (if (and (seq first-el) (< (+ 2 (count first-el) x) (count (text y))))
            (+ 2 (count first-el) x)
            (inc x))))
 
      (#{\) \] \}} (get-in text [y x]))
      (recur text y (dec x) (conj pending-open-delims
                                  ({\) \( \] \[ \} \{} (get-in text [y x]))))
-     
+
      :else
      (recur text y (dec x) pending-open-delims))))
 
