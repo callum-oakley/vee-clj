@@ -34,6 +34,11 @@
                 (count (re-find #"\s*" (text y))))
       set-cursor-col-from-x))
 
+(defn move-line-end [{text :text {y :y} :cursor :as state}]
+  (-> state
+      (assoc-in [:cursor :x] (count (text y)))
+      set-cursor-col-from-x))
+
 (defn clamp [x low high]
   (max low (min x high)))
 
@@ -393,6 +398,10 @@
         \K (move-up state)
         \l (-> state move-right set-anchor-from-cursor)
         \L (move-right state)
+        \y (-> state move-line-start set-anchor-from-cursor)
+        \Y (move-line-start state)
+        \o (-> state move-line-end set-anchor-from-cursor)
+        \O (move-line-end state)
         \f (-> state start-change delete start-insert)
         \F (-> state start-change delete-lines start-insert-above)
         \d (-> state start-change delete stop-change)
