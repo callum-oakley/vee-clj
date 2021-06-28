@@ -56,9 +56,9 @@
     (-> state
         (update
          :text
-        ;; Lot's of unnecessary copying here. If this turns out to be too slow,
-        ;; or use too much memory, we can try catvec from
-        ;; https://github.com/clojure/core.rrb-vector
+         ;; Lot's of unnecessary copying here. If this turns out to be too slow,
+         ;; or use too much memory, we can try catvec from
+         ;; https://github.com/clojure/core.rrb-vector
          #(vec (concat (subvec % 0 (:y from))
                        [(str (subs (% (:y from)) 0 (:x from))
                              (subs (% (:y to)) (:x to)))]
@@ -106,28 +106,28 @@
 
 (defn insert [{{x :x y :y} :cursor :as state} char]
   (cond
-    (open-delim? char)
-    (let [close (delims char)]
-      (-> state
-        (update-in [:text y] #(str (subs % 0 x) char close (subs % x)))
+    (= char (-> state :pending-close-delims peek))
+    (-> state
         (update-in [:cursor :x] inc)
         set-cursor-col-from-x
         set-anchor-from-cursor
-        (update :pending-close-delims conj close)))
+        (update :pending-close-delims pop))
 
-    (= char (-> state :pending-close-delims peek))
-    (-> state
-      (update-in [:cursor :x] inc)
-      set-cursor-col-from-x
-      set-anchor-from-cursor
-      (update :pending-close-delims pop))
+    (open-delim? char)
+    (let [close (delims char)]
+      (-> state
+          (update-in [:text y] #(str (subs % 0 x) char close (subs % x)))
+          (update-in [:cursor :x] inc)
+          set-cursor-col-from-x
+          set-anchor-from-cursor
+          (update :pending-close-delims conj close)))
 
     :else
     (-> state
-      (update-in [:text y] #(str (subs % 0 x) char (subs % x)))
-      (update-in [:cursor :x] inc)
-      set-cursor-col-from-x
-      set-anchor-from-cursor)))
+        (update-in [:text y] #(str (subs % 0 x) char (subs % x)))
+        (update-in [:cursor :x] inc)
+        set-cursor-col-from-x
+        set-anchor-from-cursor)))
 
 (defn insert-newline [{{x :x y :y} :cursor :as state}]
   (-> state
@@ -264,11 +264,95 @@
   (spit file-path (str (str/join "\n" text) "\n"))
   (assoc state :dirty? false))
 
+;; TODO other languages
+;; TODO strings and chars
+(defn indent-level
+  ([text y]
+   (if (zero? y)
+     0
+     (indent-level text (dec y) (dec (count (text (dec y)))) [])))
+  ([text y x pending-open-delims]
+   (cond
+     (neg? y)
+     0
+
+     (or (= "" (text y)) (and (neg? x) (seq pending-open-delims)))
+     (recur text (dec y) (dec (count (text (dec y)))) pending-open-delims)
+
+     (neg? x)
+     (->> (text y) (re-find #"\s*") count)
+
+     (= (peek pending-open-delims) (get-in text [y x]))
+     (recur text y (dec x) (pop pending-open-delims))
+
+     (#{\[ \{} (get-in text [y x]))
+     (inc x)
+
+     (= \( (get-in text [y x]))
+     (let [first-el (re-find #"\S+" (subs (text y) (inc x)))]
+       (if (#{"case"
+              "catch"
+              "cond"
+              "condp"
+              "cond->"
+              "cond->>"
+              "def"
+              "defmacro"
+              "defmethod"
+              "defmulti"
+              "defn"
+              "defn-"
+              "do"
+              "doseq"
+              "dotimes"
+              "doto"
+              "finally"
+              "for"
+              "fn"
+              "if"
+              "if-let"
+              "if-not"
+              "let"
+              "loop"
+              "ns"
+              "try"
+              "when"
+              "when-let"
+              "when-not"
+              "while"
+              "with-open"}
+            first-el)
+         (+ 2 x)
+         (if (< (+ 2 (count first-el) x) (count (text y)))
+           (+ 2 (count first-el) x)
+           (inc x))))
+
+     (#{\) \] \}} (get-in text [y x]))
+     (recur text y (dec x) (conj pending-open-delims
+                                 ({\) \( \] \[ \} \{} (get-in text [y x]))))
+
+     :else
+     (recur text y (dec x) pending-open-delims))))
+
+(defn indent [state]
+  (let [[from to] (map :y (selection state))]
+    (reduce
+     (fn [s y]
+       (update s
+               :text
+               #(vec (concat (subvec % 0 y)
+                             [(str (apply str (repeat (indent-level % y) \space))
+                                   (str/trim (% y)))]
+                             (subvec % (inc y))))))
+     state
+     (range from (inc to)))))
+
 (defn handle-input [state input]
   (case (:mode state)
     :normal
     (condp = (.getKeyType input)
       KeyType/Escape (set-anchor-from-cursor state)
+      KeyType/Tab (-> state start-change indent stop-change)
       KeyType/Character
       (case (.getCharacter input)
         \h (-> state move-left set-anchor-from-cursor)
@@ -344,17 +428,18 @@
 (defn pad-between [left right w]
   (str left (apply str (repeat (- w (count left) (count right)) \space)) right))
 
-(defn draw-status [{:keys [file-path cursor mode dirty?]} screen w y]
-  (let [status (pad-between (str file-path (when dirty? " *"))
-                            (str (-> cursor :x inc) "," (-> cursor :y inc))
-                            w)]
-    (doseq [[x char] (zipmap (range) status)]
+(defn draw-status [{:keys [file-path cursor mode dirty? msg]} screen w y]
+  (let [top (pad-between (str file-path (when dirty? " *"))
+                         (str (-> cursor :x inc) "," (-> cursor :y inc))
+                         w)
+        bottom (pad-between (name mode) (str msg) w)]
+    (doseq [[x char] (zipmap (range) top)]
       (.setCharacter screen
                      x y
                      (-> (TextCharacter. char)
-                         (.withBackgroundColor TextColor$ANSI/WHITE)))))
-  (doseq [[x char] (zipmap (range) (name mode))]
-    (.setCharacter screen x (inc y) (TextCharacter. char))))
+                         (.withBackgroundColor TextColor$ANSI/WHITE))))
+    (doseq [[x char] (zipmap (range) bottom)]
+      (.setCharacter screen x (inc y) (TextCharacter. char)))))
 
 (defn draw [state screen]
   (let [resize? (.doResizeIfNecessary screen)
