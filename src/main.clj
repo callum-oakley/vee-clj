@@ -28,6 +28,12 @@
         set-cursor-col-from-x)
     state))
 
+(defn move-line-start [{text :text {y :y} :cursor :as state}]
+  (-> state
+      (assoc-in [:cursor :x]
+                (count (re-find #"\s*" (text y))))
+      set-cursor-col-from-x))
+
 (defn clamp [x low high]
   (max low (min x high)))
 
@@ -78,6 +84,22 @@
         set-cursor-x-from-col
         set-anchor-from-cursor)))
 
+(defn clamp-cursors-xs [{:keys [cursor anchor text] :as state}]
+  (let [cursor-x (clamp (:x cursor) 0 (count (text (:y cursor))))
+        anchor-x (clamp (:x anchor) 0 (count (text (:y anchor))))]
+    (assoc state
+           :cursor {:x cursor-x :col cursor-x :y (:y cursor)}
+           :anchor {:x anchor-x :col anchor-x :y (:y anchor)})))
+
+(defn trimr [state]
+  (let [[from to] (map :y (selection state))]
+    (-> state
+        (update :text
+                #(vec (concat (subvec % 0 from)
+                              (map str/trimr (subvec % from (inc to)))
+                              (subvec % (inc to)))))
+        clamp-cursors-xs)))
+
 (defn set-cursor-style [n]
     ;; https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
     (println (str "\033[" n " q")))
@@ -88,9 +110,10 @@
 
 (defn stop-insert [state]
   (set-cursor-style 1)
-  (assoc state
-         :mode :normal
-         :pending-close-delims []))
+  (-> state
+      trimr
+      (assoc :mode :normal
+             :pending-close-delims [])))
 
 (defn start-space [state]
   (assoc state :mode :space))
@@ -129,15 +152,104 @@
         set-cursor-col-from-x
         set-anchor-from-cursor)))
 
+;; TODO other languages
+;; TODO strings
+(defn indent-level
+  ([text y]
+   (if (zero? y)
+     0
+     (indent-level text (dec y) (dec (count (text (dec y)))) [])))
+  ([text y x pending-open-delims]
+   (cond
+     (neg? y)
+     0
+
+     (or (= "" (text y)) (and (neg? x) (seq pending-open-delims)))
+     (recur text (dec y) (dec (count (text (dec y)))) pending-open-delims)
+
+     (neg? x)
+     (->> (text y) (re-find #"\s*") count)
+
+     (and (pos? x) (= \\ (get-in text [y (dec x)])))
+     (recur text y (dec x) pending-open-delims)
+
+     (= (peek pending-open-delims) (get-in text [y x]))
+     (recur text y (dec x) (pop pending-open-delims))
+
+     (#{\[ \{} (get-in text [y x]))
+     (inc x)
+
+     (= \( (get-in text [y x]))
+     (let [first-el (re-find #"\S+" (subs (text y) (inc x)))]
+       (if (#{"case"
+              "catch"
+              "cond"
+              "condp"
+              "cond->"
+              "cond->>"
+              "def"
+              "defmacro"
+              "defmethod"
+              "defmulti"
+              "defn"
+              "defn-"
+              "do"
+              "doseq"
+              "dotimes"
+              "doto"
+              "finally"
+              "for"
+              "fn"
+              "if"
+              "if-let"
+              "if-not"
+              "let"
+              "loop"
+              "ns"
+              "try"
+              "when"
+              "when-let"
+              "when-not"
+              "while"
+              "with-open"}
+            first-el)
+         (+ 2 x)
+         (if (< (+ 2 (count first-el) x) (count (text y)))
+           (+ 2 (count first-el) x)
+           (inc x))))
+
+     (#{\) \] \}} (get-in text [y x]))
+     (recur text y (dec x) (conj pending-open-delims
+                                 ({\) \( \] \[ \} \{} (get-in text [y x]))))
+     
+     :else
+     (recur text y (dec x) pending-open-delims))))
+
+(defn indent [state]
+  (let [[from to] (map :y (selection state))]
+    (reduce
+     (fn [s y]
+       (update s
+               :text
+               #(vec (concat (subvec % 0 y)
+                             [(str (apply str (repeat (indent-level % y) \space))
+                                   (str/trim (% y)))]
+                             (subvec % (inc y))))))
+     state
+     (range from (inc to)))))
+
 (defn insert-newline [{{x :x y :y} :cursor :as state}]
   (-> state
       (update
        :text
        #(vec (concat (subvec % 0 y)
-                     [(subs (% y) 0 x)
+                     [(str/trimr (subs (% y) 0 x))
                       (subs (% y) x)]
                      (subvec % (inc y)))))
-      (assoc :cursor {:x 0 :y (inc y) :col 0})
+      (assoc-in [:cursor :y] (inc y))
+      set-anchor-from-cursor
+      indent
+      move-line-start
       set-anchor-from-cursor))
 
 (defn start-insert-above [state]
@@ -264,95 +376,12 @@
   (spit file-path (str (str/join "\n" text) "\n"))
   (assoc state :dirty? false))
 
-;; TODO other languages
-;; TODO strings and chars
-(defn indent-level
-  ([text y]
-   (if (zero? y)
-     0
-     (indent-level text (dec y) (dec (count (text (dec y)))) [])))
-  ([text y x pending-open-delims]
-   (cond
-     (neg? y)
-     0
-
-     (or (= "" (text y)) (and (neg? x) (seq pending-open-delims)))
-     (recur text (dec y) (dec (count (text (dec y)))) pending-open-delims)
-
-     (neg? x)
-     (->> (text y) (re-find #"\s*") count)
-
-     (= (peek pending-open-delims) (get-in text [y x]))
-     (recur text y (dec x) (pop pending-open-delims))
-
-     (#{\[ \{} (get-in text [y x]))
-     (inc x)
-
-     (= \( (get-in text [y x]))
-     (let [first-el (re-find #"\S+" (subs (text y) (inc x)))]
-       (if (#{"case"
-              "catch"
-              "cond"
-              "condp"
-              "cond->"
-              "cond->>"
-              "def"
-              "defmacro"
-              "defmethod"
-              "defmulti"
-              "defn"
-              "defn-"
-              "do"
-              "doseq"
-              "dotimes"
-              "doto"
-              "finally"
-              "for"
-              "fn"
-              "if"
-              "if-let"
-              "if-not"
-              "let"
-              "loop"
-              "ns"
-              "try"
-              "when"
-              "when-let"
-              "when-not"
-              "while"
-              "with-open"}
-            first-el)
-         (+ 2 x)
-         (if (< (+ 2 (count first-el) x) (count (text y)))
-           (+ 2 (count first-el) x)
-           (inc x))))
-
-     (#{\) \] \}} (get-in text [y x]))
-     (recur text y (dec x) (conj pending-open-delims
-                                 ({\) \( \] \[ \} \{} (get-in text [y x]))))
-
-     :else
-     (recur text y (dec x) pending-open-delims))))
-
-(defn indent [state]
-  (let [[from to] (map :y (selection state))]
-    (reduce
-     (fn [s y]
-       (update s
-               :text
-               #(vec (concat (subvec % 0 y)
-                             [(str (apply str (repeat (indent-level % y) \space))
-                                   (str/trim (% y)))]
-                             (subvec % (inc y))))))
-     state
-     (range from (inc to)))))
-
 (defn handle-input [state input]
   (case (:mode state)
     :normal
     (condp = (.getKeyType input)
       KeyType/Escape (set-anchor-from-cursor state)
-      KeyType/Tab (-> state start-change indent stop-change)
+      KeyType/Tab (-> state start-change indent trimr stop-change)
       KeyType/Character
       (case (.getCharacter input)
         \h (-> state move-left set-anchor-from-cursor)
