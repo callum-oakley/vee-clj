@@ -132,6 +132,7 @@
 (def open-delim?
   (set (keys delims)))
 
+;; TODO have backspace and delete play nicely with auto pairs
 (defn insert [{{x :x y :y} :cursor :as state} char]
   (cond
     (= char (-> state :pending-close-delims peek))
@@ -157,79 +158,122 @@
         set-cursor-col-from-x
         set-anchor-from-cursor)))
 
-;; TODO other languages
-;; TODO strings
-(defn indent-level
-  ([text y]
-   (if (zero? y)
-     0
-     (indent-level text (dec y) (dec (count (text (dec y)))) [])))
-  ([text y x pending-open-delims]
-   (cond
-     (neg? y)
-     0
+(defn indent-level-clj
+  "Clojure indent function.
+   This docstring mainly exists for testing multiline string indentation."
+  [text y-start]
+  (if (zero? y-start)
+    0
+    (let [unq? (fn [c x y]
+                 (and (= c (get-in text [y x]))
+                      (or (zero? x) (not= \\ (get-in text [y (dec x)])))))
+          [in-comment? in-str?]
+          (->> (range (count text))
+               (mapcat
+                (fn [y] (map (fn [x] [x y]) (range (count (text y))))))
+               (reduce
+                (fn [[cs ss state] [x y]]
+                  (let [state (if (and (= :comment state) (zero? x))
+                                :normal
+                                state)]
+                    (case state
+                      :normal (cond
+                                (unq? \; x y) [(conj cs [x y]) ss :comment]
+                                (unq? \" x y) [cs (conj ss [x y]) :string]
+                                :else [cs ss :normal])
+                      :comment [(conj cs [x y]) ss :comment]
+                      :string (if (unq? \" x y)
+                                [cs (conj ss [x y]) :normal]
+                                [cs (conj ss [x y]) :string]))))
+                [#{} #{} :normal]))]
+      (if (in-str? [0 y-start])
+        (loop [y (dec y-start)
+               x (dec (count (text (dec y-start))))]
+          (cond
+            (neg? x)
+            (recur (dec y) (dec (count (text (dec y)))))
 
-     (or (= "" (text y)) (and (neg? x) (seq pending-open-delims)))
-     (recur text (dec y) (dec (count (text (dec y)))) pending-open-delims)
+            (in-str? [x y])
+            (recur y (dec x))
 
-     (neg? x)
-     (->> (text y) (re-find #"\s*") count)
+            :else
+            (+ 2 x)))
+        (loop [y (dec y-start)
+               x (dec (count (text (dec y-start))))
+               pending-open-delims []]
+          (cond
+            (neg? y)
+            0
 
-     (and (pos? x) (= \\ (get-in text [y (dec x)])))
-     (recur text y (dec x) pending-open-delims)
+            (or (= "" (text y))
+                (and (neg? x) (or (seq pending-open-delims) (in-str? [0 y]))))
+            (recur (dec y) (dec (count (text (dec y)))) pending-open-delims)
 
-     (= (peek pending-open-delims) (get-in text [y x]))
-     (recur text y (dec x) (pop pending-open-delims))
+            (neg? x)
+            (->> (text y) (re-find #"\s*") count)
 
-     (#{\[ \{} (get-in text [y x]))
-     (inc x)
+            (or (in-comment? [x y])
+                (in-str? [x y])
+                (and (pos? x) (= \\ (get-in text [y (dec x)]))))
+            (recur y (dec x) pending-open-delims)
 
-     (= \( (get-in text [y x]))
-     (let [first-el (re-find #"^[a-zA-Z0-9*+!\-_'?<>=/.:]*"
-                             (subs (text y) (inc x)))]
-       (if (#{"case"
-              "catch"
-              "cond"
-              "condp"
-              "cond->"
-              "cond->>"
-              "def"
-              "defmacro"
-              "defmethod"
-              "defmulti"
-              "defn"
-              "defn-"
-              "do"
-              "doseq"
-              "dotimes"
-              "doto"
-              "finally"
-              "for"
-              "fn"
-              "if"
-              "if-let"
-              "if-not"
-              "let"
-              "loop"
-              "ns"
-              "try"
-              "when"
-              "when-let"
-              "when-not"
-              "while"
-              "with-open"}
-            first-el)
-         (+ 2 x)
-         (if (and (seq first-el) (< (+ 2 (count first-el) x) (count (text y))))
-           (+ 2 (count first-el) x)
-           (inc x))))
+            (= (peek pending-open-delims) (get-in text [y x]))
+            (recur y (dec x) (pop pending-open-delims))
 
-     (#{\) \] \}} (get-in text [y x]))
-     (recur text y (dec x) (conj pending-open-delims
-                                 ({\) \( \] \[ \} \{} (get-in text [y x]))))
+            (#{\[ \{} (get-in text [y x]))
+            (inc x)
 
-     :else
-     (recur text y (dec x) pending-open-delims))))
+            (= \( (get-in text [y x]))
+            (let [first-el (re-find #"^[a-zA-Z0-9*+!\-_'?<>=/.:]*"
+                                    (subs (text y) (inc x)))]
+              (if (#{"case"
+                     "catch"
+                     "cond"
+                     "condp"
+                     "cond->"
+                     "cond->>"
+                     "def"
+                     "defmacro"
+                     "defmethod"
+                     "defmulti"
+                     "defn"
+                     "defn-"
+                     "do"
+                     "doseq"
+                     "dotimes"
+                     "doto"
+                     "finally"
+                     "for"
+                     "fn"
+                     "if"
+                     "if-let"
+                     "if-not"
+                     "let"
+                     "loop"
+                     "ns"
+                     "try"
+                     "when"
+                     "when-let"
+                     "when-not"
+                     "while"
+                     "with-open"}
+                   first-el)
+                (+ 2 x)
+                (if (and (seq first-el)
+                         (< (+ 2 (count first-el) x) (count (text y))))
+                  (+ 2 (count first-el) x)
+                  (inc x))))
+
+            (#{\) \] \}} (get-in text [y x]))
+            (recur y (dec x) (conj pending-open-delims
+                                   ({\) \( \] \[ \} \{} (get-in text [y x]))))
+
+            :else
+            (recur y (dec x) pending-open-delims)))))))
+
+(defn indent-level [text y]
+  ;; TODO other languages
+  (indent-level-clj text y))
 
 (defn indent [state]
   (let [[from to] (map :y (selection state))]
