@@ -197,7 +197,6 @@
 (def mirror
   {\( \) \[ \] \{ \} \) \( \] \[ \} \{})
 
-;; TODO use this in indent
 (defn open-delim [text cursor {:keys [in-comment? in-string? dq?]} limit]
   (let [char (fn [x y] (get-in text [y x]))]
     (if (in-string? (:x cursor) (:y cursor))
@@ -241,6 +240,52 @@
 
           :else
           (recur (dec x) y pending))))))
+
+(defn close-delim [text cursor {:keys [in-comment? in-string? dq?]} limit]
+  (let [char (fn [x y] (get-in text [y x]))]
+    (if (in-string? (:x cursor) (:y cursor))
+      (loop [x (:x cursor)
+             y (:y cursor)]
+        (cond
+          (or (and (= (-> text count dec) y) (= (-> y text count) x))
+              (< limit (- y (:y cursor))))
+          nil
+
+          (= (-> y text count) x)
+          (recur 0 (inc y))
+
+          (dq? x y)
+          {:x x :y y}
+
+          :else
+          (recur (inc x) y)))
+      (loop [x (:x cursor)
+             y (:y cursor)
+             pending []]
+        (cond
+          (or (and (= (-> text count dec) y) (= (-> y text count) x))
+              (< limit (- y (:y cursor))))
+          nil
+
+          (= (-> y text count) x)
+          (recur 0 (inc y) pending)
+
+          (or (in-comment? x y)
+              (in-string? x y)
+              (and (pos? x) (= \\ (char (dec x) y))))
+          (recur (inc x) y pending)
+
+          (= (peek pending) (char x y))
+          (recur (inc x) y (pop pending))
+
+          (#{\( \[ \{} (char x y))
+          (recur (inc x) y (conj pending (mirror (char x y))))
+
+          (#{\) \] \}} (char x y))
+          {:x x :y y}
+
+          :else
+          (recur (inc x) y pending))))))
 
 (defn indent-level [text y annotations]
   (if-let [{x :x y :y} (open-delim text {:x 0 :y y} annotations 100)]
@@ -508,6 +553,7 @@
 (defn draw-editor [{:keys [text cursor] :as state} screen w h]
   (let [ans (annotations text)
         open (open-delim text cursor ans (int (/ h 2)))
+        close (close-delim text cursor ans (int (/ h 2)))
         {:keys [in-comment? in-string? dq?]} ans
         x-offset (clamp (- (:x cursor) (int (/ w 2)))
                         0 (- (inc (count (text (:y cursor)))) w))
@@ -532,7 +578,8 @@
                              (dq? (+ x x-offset) (+ y y-offset)))
                          (.withModifier SGR/ITALIC)
 
-                         (#{open} {:x (+ x x-offset) :y (+ y y-offset)})
+                         ((set [open close])
+                          {:x (+ x x-offset) :y (+ y y-offset)})
                          (.withForegroundColor TextColor$ANSI/RED)))))
     (.setCursorPosition screen (TerminalPosition. (- (:x cursor) x-offset)
                                                   (- (:y cursor) y-offset)))))
