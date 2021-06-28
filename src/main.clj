@@ -4,6 +4,7 @@
   (:import
    [java.awt Toolkit datatransfer.StringSelection datatransfer.DataFlavor]
    [com.googlecode.lanterna
+    SGR
     TextCharacter
     TerminalPosition
     TextColor$ANSI
@@ -135,6 +136,7 @@
 ;; TODO have backspace and delete play nicely with auto pairs
 (defn insert [{{x :x y :y} :cursor :as state} char]
   (cond
+    ;; TODO only if the next char in the text matches
     (= char (-> state :pending-close-delims peek))
     (-> state
         (update-in [:cursor :x] inc)
@@ -158,133 +160,147 @@
         set-cursor-col-from-x
         set-anchor-from-cursor)))
 
-(defn indent-level-clj
-  "Clojure indent function.
-   This docstring mainly exists for testing multiline string indentation."
-  [text y-start]
-  (if (zero? y-start)
-    0
-    (let [unq? (fn [c x y]
-                 (and (= c (get-in text [y x]))
-                      (or (zero? x) (not= \\ (get-in text [y (dec x)])))))
-          [in-comment? in-str?]
-          (->> (range (count text))
-               (mapcat
-                (fn [y] (map (fn [x] [x y]) (range (count (text y))))))
-               (reduce
-                (fn [[cs ss state] [x y]]
-                  (let [state (if (and (= :comment state) (zero? x))
-                                :normal
-                                state)]
-                    (case state
-                      :normal (cond
-                                (unq? \; x y) [(conj cs [x y]) ss :comment]
-                                (unq? \" x y) [cs (conj ss [x y]) :string]
-                                :else [cs ss :normal])
-                      :comment [(conj cs [x y]) ss :comment]
-                      :string (if (unq? \" x y)
-                                [cs (conj ss [x y]) :normal]
-                                [cs (conj ss [x y]) :string]))))
-                [#{} #{} :normal]))]
-      (if (in-str? [0 y-start])
-        (loop [y (dec y-start)
-               x (dec (count (text (dec y-start))))]
-          (cond
-            (neg? x)
-            (recur (dec y) (dec (count (text (dec y)))))
+;; Cache these -- they're expensive and they only need to change when the text
+;; changes.
+(defn annotations [text]
+  (let [unq? (fn [c x y]
+               (and (= c (get-in text [y x]))
+                    (or (zero? x) (not= \\ (get-in text [y (dec x)])))))
+        [comment string dqs]
+        (->> (range (count text))
+             (mapcat
+              (fn [y] (map (fn [x] [x y]) (range (count (text y))))))
+             (reduce
+              (fn [[comment string dqs state] [x y]]
+                (let [state (if (and (= :comment state) (zero? x))
+                              :normal
+                              state)]
+                  (case state
+                    :normal
+                    (cond
+                      (unq? \; x y) [(conj comment [x y]) string dqs :comment]
+                      (unq? \" x y) [comment string (conj dqs [x y]) :string]
+                      :else [comment string dqs :normal])
 
-            (in-str? [x y])
-            (recur y (dec x))
+                    :comment
+                    [(conj comment [x y]) string dqs :comment]
 
-            :else
-            (+ 2 x)))
-        (loop [y (dec y-start)
-               x (dec (count (text (dec y-start))))
-               pending-open-delims []]
-          (cond
-            (neg? y)
-            0
+                    :string
+                    (if (unq? \" x y)
+                      [comment (conj string [x y]) (conj dqs [x y]) :normal]
+                      [comment (conj string [x y]) dqs :string]))))
+              [#{} #{} #{} :normal]))]
+    {:in-comment? (fn [x y] (comment [x y]))
+     :in-string? (fn [x y] (string [x y]))
+     :dq? (fn [x y] (dqs [x y]))}))
 
-            (or (= "" (text y))
-                (and (neg? x) (or (seq pending-open-delims) (in-str? [0 y]))))
-            (recur (dec y) (dec (count (text (dec y)))) pending-open-delims)
+(def mirror
+  {\( \) \[ \] \{ \} \) \( \] \[ \} \{})
 
-            (neg? x)
-            (->> (text y) (re-find #"\s*") count)
+;; TODO use this in indent
+(defn open-delim [text cursor {:keys [in-comment? in-string? dq?]} limit]
+  (let [char (fn [x y] (get-in text [y x]))]
+    (if (in-string? (:x cursor) (:y cursor))
+      (loop [x (dec (:x cursor))
+             y (:y cursor)]
+        (cond
+          (or (and (zero? y) (neg? x)) (< limit (- (:y cursor) y)))
+          nil
 
-            (or (in-comment? [x y])
-                (in-str? [x y])
-                (and (pos? x) (= \\ (get-in text [y (dec x)]))))
-            (recur y (dec x) pending-open-delims)
+          (neg? x)
+          (recur (-> y dec text count dec) (dec y))
 
-            (= (peek pending-open-delims) (get-in text [y x]))
-            (recur y (dec x) (pop pending-open-delims))
+          (dq? x y)
+          {:x x :y y}
 
-            (#{\[ \{} (get-in text [y x]))
-            (inc x)
+          :else
+          (recur (dec x) y)))
+      (loop [x (dec (:x cursor))
+             y (:y cursor)
+             pending []]
+        (cond
+          (or (and (zero? y) (neg? x)) (< limit (- (:y cursor) y)))
+          nil
 
-            (= \( (get-in text [y x]))
-            (let [first-el (re-find #"^[a-zA-Z0-9*+!\-_'?<>=/.:]*"
-                                    (subs (text y) (inc x)))]
-              (if (#{"case"
-                     "catch"
-                     "cond"
-                     "condp"
-                     "cond->"
-                     "cond->>"
-                     "def"
-                     "defmacro"
-                     "defmethod"
-                     "defmulti"
-                     "defn"
-                     "defn-"
-                     "do"
-                     "doseq"
-                     "dotimes"
-                     "doto"
-                     "finally"
-                     "for"
-                     "fn"
-                     "if"
-                     "if-let"
-                     "if-not"
-                     "let"
-                     "loop"
-                     "ns"
-                     "try"
-                     "when"
-                     "when-let"
-                     "when-not"
-                     "while"
-                     "with-open"}
-                   first-el)
-                (+ 2 x)
-                (if (and (seq first-el)
-                         (< (+ 2 (count first-el) x) (count (text y))))
-                  (+ 2 (count first-el) x)
-                  (inc x))))
+          (neg? x)
+          (recur (-> y dec text count dec) (dec y) pending)
 
-            (#{\) \] \}} (get-in text [y x]))
-            (recur y (dec x) (conj pending-open-delims
-                                   ({\) \( \] \[ \} \{} (get-in text [y x]))))
+          (or (in-comment? x y)
+              (in-string? x y)
+              (and (pos? x) (= \\ (char (dec x) y))))
+          (recur (dec x) y pending)
 
-            :else
-            (recur y (dec x) pending-open-delims)))))))
+          (= (peek pending) (char x y))
+          (recur (dec x) y (pop pending))
 
-(defn indent-level [text y]
-  ;; TODO other languages
-  (indent-level-clj text y))
+          (#{\) \] \}} (char x y))
+          (recur (dec x) y (conj pending (mirror (char x y))))
+
+          (#{\( \[ \{} (char x y))
+          {:x x :y y}
+
+          :else
+          (recur (dec x) y pending))))))
+
+(defn indent-level [text y annotations]
+  (if-let [{x :x y :y} (open-delim text {:x 0 :y y} annotations 100)]
+    (if (= \( (get-in text [y x]))
+      (let [first-el (re-find #"^[a-zA-Z0-9*+!\-_'?<>=/.:]*"
+                              (subs (text y) (inc x)))]
+        (if (#{"case"
+               "catch"
+               "cond"
+               "condp"
+               "cond->"
+               "cond->>"
+               "def"
+               "defmacro"
+               "defmethod"
+               "defmulti"
+               "defn"
+               "defn-"
+               "do"
+               "doseq"
+               "dotimes"
+               "doto"
+               "finally"
+               "for"
+               "fn"
+               "if"
+               "if-let"
+               "if-not"
+               "let"
+               "loop"
+               "ns"
+               "try"
+               "when"
+               "when-let"
+               "when-not"
+               "while"
+               "with-open"}
+             first-el)
+          (+ 2 x)
+          (if (and (seq first-el)
+                   (< (+ 2 (count first-el) x) (count (text y))))
+            (+ 2 (count first-el) x)
+            (inc x))))
+      (inc x))
+    0))
 
 (defn indent [state]
   (let [[from to] (map :y (selection state))]
     (reduce
      (fn [s y]
-       (update s
-               :text
-               #(vec (concat (subvec % 0 y)
-                             [(str (apply str (repeat (indent-level % y) \space))
-                                   (str/trim (% y)))]
-                             (subvec % (inc y))))))
+       (update
+        s
+        :text
+        #(vec
+          (concat
+           (subvec % 0 y)
+           [(str
+             (apply str (repeat (indent-level % y (annotations %)) \space))
+             (str/trim (% y)))]
+           (subvec % (inc y))))))
      state
      (range from (inc to)))))
 
@@ -490,7 +506,10 @@
          (or (< y (:y to)) (and (= y (:y to)) (< x (:x to)))))))
 
 (defn draw-editor [{:keys [text cursor] :as state} screen w h]
-  (let [x-offset (clamp (- (:x cursor) (int (/ w 2)))
+  (let [ans (annotations text)
+        open (open-delim text cursor ans (int (/ h 2)))
+        {:keys [in-comment? in-string? dq?]} ans
+        x-offset (clamp (- (:x cursor) (int (/ w 2)))
                         0 (- (inc (count (text (:y cursor)))) w))
         y-offset (clamp (- (:y cursor) (int (/ h 2)))
                         0 (- (count text) h))
@@ -504,7 +523,17 @@
                        x y
                        (cond-> (TextCharacter. char)
                          (in-selection? state (+ x x-offset) (+ y y-offset))
-                         (.withBackgroundColor TextColor$ANSI/WHITE)))))
+                         (.withBackgroundColor TextColor$ANSI/WHITE)
+
+                         (in-comment? (+ x x-offset) (+ y y-offset))
+                         (.withForegroundColor TextColor$ANSI/RED)
+
+                         (or (in-string? (+ x x-offset) (+ y y-offset))
+                             (dq? (+ x x-offset) (+ y y-offset)))
+                         (.withModifier SGR/ITALIC)
+
+                         (#{open} {:x (+ x x-offset) :y (+ y y-offset)})
+                         (.withForegroundColor TextColor$ANSI/RED)))))
     (.setCursorPosition screen (TerminalPosition. (- (:x cursor) x-offset)
                                                   (- (:y cursor) y-offset)))))
 
