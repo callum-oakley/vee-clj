@@ -73,112 +73,7 @@
   (when anchor
     (sort-by (juxt :y :x) [cursor anchor])))
 
-(defn delete [state]
-  (if-let [[from to] (selection state)]
-    (-> state
-        (update
-         :text
-         ;; Lot's of unnecessary copying here. If this turns out to be too slow,
-         ;; or use too much memory, we can try catvec from
-         ;; https://github.com/clojure/core.rrb-vector
-         #(vec (concat (subvec % 0 (:y from))
-                       [(str (subs (% (:y from)) 0 (:x from))
-                             (subs (% (:y to)) (:x to)))]
-                       (subvec % (inc (:y to))))))
-        (assoc :cursor from :anchor nil))
-    state))
-
-(defn delete-lines [{text :text {y :y} :cursor :as state}]
-  (if-let [[{from :y} {to :y}] (selection state)]
-    (-> state
-        (update :text #(vec (concat (subvec % 0 from) (subvec % (inc to)))))
-        (assoc-in [:cursor :y] (if (= to (dec (count text)))
-                                 (dec from)
-                                 from))
-        set-cursor-x-from-col
-        (assoc :anchor nil))
-    (-> state
-        (update :text #(vec (concat (subvec % 0 y) (subvec % (inc y)))))
-        (assoc-in [:cursor :y] (if (= y (dec (count text)))
-                                 (dec y)
-                                 y))
-        set-cursor-x-from-col)))
-
-(defn clamp-cursors-xs [{:keys [cursor anchor text] :as state}]
-  (let [cursor-x (clamp (:x cursor) 0 (count (text (:y cursor))))
-        anchor-x (when anchor (clamp (:x anchor) 0 (count (text (:y anchor)))))]
-    (assoc state
-           :cursor {:x cursor-x :col cursor-x :y (:y cursor)}
-           :anchor (when anchor {:x anchor-x :col anchor-x :y (:y anchor)}))))
-
-(defn trimr [{{y :y} :cursor :as state}]
-  (if-let [[{from :y} {to :y}] (selection state)]
-    (-> state
-        (update :text
-                #(vec (concat (subvec % 0 from)
-                              (map str/trimr (subvec % from (inc to)))
-                              (subvec % (inc to)))))
-        clamp-cursors-xs)
-    (-> state
-        (update :text
-                #(vec (concat (subvec % 0 y)
-                              [(str/trimr (% y))]
-                              (subvec % (inc y))))))))
-
-(defn set-cursor-style [n]
-  ;; https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
-  (println (str "\033[" n " q")))
-
-(defn start-insert [state]
-  (set-cursor-style 3)
-  (assoc state :mode :insert))
-
-(defn stop-insert [state]
-  (set-cursor-style 1)
-  (-> state
-      trimr
-      (assoc :mode :normal
-             :pending-close-delims [])))
-
-(defn start-space [state]
-  (assoc state :mode :space))
-
-(defn stop-space [state]
-  (assoc state :mode :normal))
-
-(def delims
-  {\( \) \[ \] \{ \} \" \"})
-
-(def open-delim?
-  (set (keys delims)))
-
-;; TODO have backspace and delete play nicely with auto pairs
-(defn insert [{{x :x y :y} :cursor :as state} char]
-  (cond
-    ;; TODO only if the next char in the text matches
-    (= char (-> state :pending-close-delims peek))
-    (-> state
-        (update-in [:cursor :x] inc)
-        set-cursor-col-from-x
-        (update :pending-close-delims pop))
-
-    (open-delim? char)
-    (let [close (delims char)]
-      (-> state
-          (update-in [:text y] #(str (subs % 0 x) char close (subs % x)))
-          (update-in [:cursor :x] inc)
-          set-cursor-col-from-x
-          (update :pending-close-delims conj close)))
-
-    :else
-    (-> state
-        (update-in [:text y] #(str (subs % 0 x) char (subs % x)))
-        (update-in [:cursor :x] inc)
-        set-cursor-col-from-x)))
-
-;; Cache these -- they're expensive and they only need to change when the text
-;; changes.
-(defn annotations [text]
+(defn annotate [{text :text :as state}]
   (let [unq? (fn [c x y]
                (and (= c (get-in text [y x]))
                     (or (zero? x) (not= \\ (get-in text [y (dec x)])))))
@@ -206,14 +101,123 @@
                       [comment (conj string [x y]) (conj dqs [x y]) :normal]
                       [comment (conj string [x y]) dqs :string]))))
               [#{} #{} #{} :normal]))]
-    {:in-comment? (fn [x y] (comment [x y]))
-     :in-string? (fn [x y] (string [x y]))
-     :dq? (fn [x y] (dqs [x y]))}))
+    (assoc state :annotations {:in-comment? (fn [x y] (comment [x y]))
+                               :in-string? (fn [x y] (string [x y]))
+                               :dq? (fn [x y] (dqs [x y]))})))
+
+(defn delete [state]
+  (if-let [[from to] (selection state)]
+    (-> state
+        (update
+         :text
+         ;; Lot's of unnecessary copying here. If this turns out to be too slow,
+         ;; or use too much memory, we can try catvec from
+         ;; https://github.com/clojure/core.rrb-vector
+         #(vec (concat (subvec % 0 (:y from))
+                       [(str (subs (% (:y from)) 0 (:x from))
+                             (subs (% (:y to)) (:x to)))]
+                       (subvec % (inc (:y to))))))
+        annotate
+        (assoc :cursor from :anchor nil))
+    state))
+
+(defn delete-lines [{text :text {y :y} :cursor :as state}]
+  (if-let [[{from :y} {to :y}] (selection state)]
+    (-> state
+        (update :text #(vec (concat (subvec % 0 from) (subvec % (inc to)))))
+        annotate
+        (assoc-in [:cursor :y] (if (= to (dec (count text)))
+                                 (dec from)
+                                 from))
+        set-cursor-x-from-col
+        (assoc :anchor nil))
+    (-> state
+        (update :text #(vec (concat (subvec % 0 y) (subvec % (inc y)))))
+        annotate
+        (assoc-in [:cursor :y] (if (= y (dec (count text)))
+                                 (dec y)
+                                 y))
+        set-cursor-x-from-col)))
+
+(defn clamp-cursors-xs [{:keys [cursor anchor text] :as state}]
+  (let [cursor-x (clamp (:x cursor) 0 (count (text (:y cursor))))
+        anchor-x (when anchor (clamp (:x anchor) 0 (count (text (:y anchor)))))]
+    (assoc state
+           :cursor {:x cursor-x :col cursor-x :y (:y cursor)}
+           :anchor (when anchor {:x anchor-x :col anchor-x :y (:y anchor)}))))
+
+(defn trimr [{{y :y} :cursor :as state}]
+  (if-let [[{from :y} {to :y}] (selection state)]
+    (-> state
+        (update :text
+                #(vec (concat (subvec % 0 from)
+                              (map str/trimr (subvec % from (inc to)))
+                              (subvec % (inc to)))))
+        annotate
+        clamp-cursors-xs)
+    (-> state
+        (update-in [:text y] str/trimr)
+        annotate)))
+
+(defn set-cursor-style [n]
+  ;; https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
+  (println (str "\033[" n " q")))
+
+(defn start-insert [state]
+  (set-cursor-style 3)
+  (assoc state :mode :insert))
+
+(defn stop-insert [state]
+  (set-cursor-style 1)
+  (-> state
+      trimr
+      (assoc :mode :normal
+             :pending-close-delims [])))
+
+(defn start-space [state]
+  (assoc state :mode :space))
+
+(defn stop-space [state]
+  (assoc state :mode :normal))
+
+;; TODO clean up duplication between this and mirror etc below
+(def delims
+  {\( \) \[ \] \{ \} \" \"})
+
+(def open-delim?
+  (set (keys delims)))
+
+;; TODO have backspace and delete play nicely with auto pairs
+(defn insert [{{x :x y :y} :cursor :as state} char]
+  (cond
+    ;; TODO only if the next char in the text matches
+    (= char (-> state :pending-close-delims peek))
+    (-> state
+        (update-in [:cursor :x] inc)
+        set-cursor-col-from-x
+        (update :pending-close-delims pop))
+
+    (open-delim? char)
+    (let [close (delims char)]
+      (-> state
+          (update-in [:text y] #(str (subs % 0 x) char close (subs % x)))
+          annotate
+          (update-in [:cursor :x] inc)
+          set-cursor-col-from-x
+          (update :pending-close-delims conj close)))
+
+    :else
+    (-> state
+        (update-in [:text y] #(str (subs % 0 x) char (subs % x)))
+        annotate
+        (update-in [:cursor :x] inc)
+        set-cursor-col-from-x)))
 
 (def mirror
   {\( \) \[ \] \{ \} \) \( \] \[ \} \{})
 
-(defn open-delim [text cursor {:keys [in-comment? in-string? dq?]} limit]
+(defn open-delim
+  [{text :text {:keys [in-comment? in-string? dq?]} :annotations} cursor limit]
   (let [char (fn [x y] (get-in text [y x]))]
     (if (in-string? (:x cursor) (:y cursor))
       (loop [x (dec (:x cursor))
@@ -257,7 +261,8 @@
           :else
           (recur (dec x) y pending))))))
 
-(defn close-delim [text cursor {:keys [in-comment? in-string? dq?]} limit]
+(defn close-delim
+  [{text :text {:keys [in-comment? in-string? dq?]} :annotations} cursor limit]
   (let [char (fn [x y] (get-in text [y x]))]
     (if (in-string? (:x cursor) (:y cursor))
       (loop [x (:x cursor)
@@ -303,8 +308,8 @@
           :else
           (recur (inc x) y pending))))))
 
-(defn indent-level [text y annotations]
-  (if-let [{x :x y :y} (open-delim text {:x 0 :y y} annotations 100)]
+(defn indent-level [{text :text :as state} y]
+  (if-let [{x :x y :y} (open-delim state {:x 0 :y y} 100)]
     (if (= \( (get-in text [y x]))
       (let [first-el (re-find #"^[a-zA-Z0-9*+!\-_'?<>=/.:]*"
                               (subs (text y) (inc x)))]
@@ -351,16 +356,11 @@
 (defn indent [{{y :y} :cursor :as state}]
   (let [indent-line
         (fn [s y]
-          (update
-           s
-           :text
-           #(vec
-             (concat
-              (subvec % 0 y)
-              [(str
-                (apply str (repeat (indent-level % y (annotations %)) \space))
-                (str/trim (% y)))]
-              (subvec % (inc y))))))]
+          (-> s
+              (update-in [:text y]
+                         #(str (apply str (repeat (indent-level s y) \space))
+                               (str/trim %)))
+              annotate))]
     (if-let [[{from :y} {to :y}] (selection state)]
       (reduce indent-line state (range from (inc to)))
       (indent-line state y))))
@@ -373,6 +373,7 @@
                      [(str/trimr (subs (% y) 0 x))
                       (subs (% y) x)]
                      (subvec % (inc y)))))
+      annotate
       (assoc-in [:cursor :y] (inc y))
       indent
       move-line-start))
@@ -389,36 +390,32 @@
   (cond
     (and (zero? x) (zero? y)) state
     (zero? x) (-> state
-                  (update
-                   :text
-                   #(vec (concat (subvec % 0 (dec y))
-                                 [(str (% (dec y)) (% y))]
-                                 (subvec % (inc y)))))
+                  (update :text
+                          #(vec (concat (subvec % 0 (dec y))
+                                        [(str (% (dec y)) (% y))]
+                                        (subvec % (inc y)))))
+                  annotate
                   (assoc :cursor {:x (count (text (dec y)))
                                   :y (dec y)})
                   set-cursor-col-from-x)
     :else (-> state
-              (update
-               :text
-               #(vec (concat (subvec % 0 y)
-                             [(str (subs (% y) 0 (dec x)) (subs (% y) x))]
-                             (subvec % (inc y)))))
+              (update-in [:text y] #(str (subs % 0 (dec x)) (subs % x)))
+              annotate
               (update-in [:cursor :x] dec)
               set-cursor-col-from-x)))
 
 (defn insert-delete [{text :text {x :x y :y} :cursor :as state}]
   (cond
     (and (= (count (text y)) x) (= (dec (count text)) y)) state
-    (= (count (text y)) x) (update state
-                                   :text
-                                   #(vec (concat (subvec % 0 y)
-                                                 [(str (% y) (% (inc y)))]
-                                                 (subvec % (+ y 2)))))
-    :else (update state
-                  :text
-                  #(vec (concat (subvec % 0 y)
-                                [(str (subs (% y) 0 x) (subs (% y) (inc x)))]
-                                (subvec % (inc y)))))))
+    (= (count (text y)) x) (-> state
+                               (update :text
+                                       #(vec (concat (subvec % 0 y)
+                                                     [(str (% y) (% (inc y)))]
+                                                     (subvec % (+ y 2)))))
+                               annotate)
+    :else (-> state
+              (update-in [:text y] #(str (subs % 0 x) (subs % (inc x))))
+              annotate)))
 
 (defn snapshot [state]
   (select-keys state [:text :cursor :anchor]))
@@ -438,6 +435,7 @@
     (-> state
         (update :past pop)
         (merge (:before change))
+        annotate
         (update :future conj change))
     state))
 
@@ -446,6 +444,7 @@
     (-> state
         (update :future pop)
         (merge (:after change))
+        annotate
         (update :past conj change))
     state))
 
@@ -481,15 +480,17 @@
 
 (defn paste [{{x :x y :y} :cursor :as state}]
   (let [clip (str/split (read-clipboard) #"\n" -1)]
-    (update state
-            :text
-            #(vec (concat (subvec % 0 y)
-                          (if (= 1 (count clip))
-                            [(str (subs (% y) 0 x) (first clip) (subs (% y) x))]
-                            (concat [(str (subs (% y) 0 x) (first clip))]
-                                    (drop-last (rest clip))
-                                    [(str (last clip) (subs (% y) x))]))
-                          (subvec % (inc y)))))))
+    (-> state
+        (update
+         :text
+         #(vec (concat (subvec % 0 y)
+                       (if (= 1 (count clip))
+                         [(str (subs (% y) 0 x) (first clip) (subs (% y) x))]
+                         (concat [(str (subs (% y) 0 x) (first clip))]
+                                 (drop-last (rest clip))
+                                 [(str (last clip) (subs (% y) x))]))
+                       (subvec % (inc y)))))
+        annotate)))
 
 (defn paste-lines [{{y :y} :cursor :as state}]
   (let [clip (str/split-lines (read-clipboard))]
@@ -562,11 +563,10 @@
     (and (or (< (:y from) y) (and (= (:y from) y) (<= (:x from) x)))
          (or (< y (:y to)) (and (= y (:y to)) (< x (:x to)))))))
 
-(defn draw-editor [{:keys [text cursor] :as state} screen w h]
-  (let [ans (annotations text)
-        delim? (set [(open-delim text cursor ans (int (/ h 2)))
-                     (close-delim text cursor ans (int (/ h 2)))])
-        {:keys [in-comment? in-string? dq?]} ans
+(defn draw-editor [{:keys [text cursor annotations] :as state} screen w h]
+  (let [delim? (set [(open-delim state cursor (int (/ h 2)))
+                     (close-delim state cursor (int (/ h 2)))])
+        {:keys [in-comment? in-string? dq?]} annotations
         x-offset (clamp (- (:x cursor) (int (/ w 2)))
                         0 (- (inc (count (text (:y cursor)))) w))
         y-offset (clamp (- (:y cursor) (int (/ h 2)))
@@ -624,15 +624,15 @@
                        Screen$RefreshType/DELTA))))
 
 (defn initial-state [file-path]
-  {:file-path file-path
-   :text (str/split-lines (slurp file-path))
-   :cursor {:x 0 :y 0 :col 0}
-   :anchor nil
-   :mode :normal
-   :past []
-   :future []
-   :dirty? false
-   :pending-close-delims []})
+  (annotate {:file-path file-path
+             :text (str/split-lines (slurp file-path))
+             :cursor {:x 0 :y 0 :col 0}
+             :anchor nil
+             :mode :normal
+             :past []
+             :future []
+             :dirty? false
+             :pending-close-delims []}))
 
 (defn main [_]
   (with-open [screen (.createScreen (DefaultTerminalFactory.))]
