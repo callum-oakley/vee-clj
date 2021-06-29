@@ -8,6 +8,7 @@
     TextCharacter
     TerminalPosition
     TextColor$ANSI
+    TextColor$Indexed
     screen.Screen$RefreshType
     input.KeyType
     terminal.DefaultTerminalFactory]))
@@ -552,8 +553,8 @@
 
 (defn draw-editor [{:keys [text cursor] :as state} screen w h]
   (let [ans (annotations text)
-        open (open-delim text cursor ans (int (/ h 2)))
-        close (close-delim text cursor ans (int (/ h 2)))
+        delims (set [(open-delim text cursor ans (int (/ h 2)))
+                     (close-delim text cursor ans (int (/ h 2)))])
         {:keys [in-comment? in-string? dq?]} ans
         x-offset (clamp (- (:x cursor) (int (/ w 2)))
                         0 (- (inc (count (text (:y cursor)))) w))
@@ -568,6 +569,9 @@
         (.setCharacter screen
                        x y
                        (cond-> (TextCharacter. char)
+                         (delims {:x (+ x x-offset) :y (+ y y-offset)})
+                         (.withBackgroundColor (TextColor$Indexed. 255))
+
                          (in-selection? state (+ x x-offset) (+ y y-offset))
                          (.withBackgroundColor TextColor$ANSI/WHITE)
 
@@ -576,11 +580,7 @@
 
                          (or (in-string? (+ x x-offset) (+ y y-offset))
                              (dq? (+ x x-offset) (+ y y-offset)))
-                         (.withModifier SGR/ITALIC)
-
-                         ((set [open close])
-                          {:x (+ x x-offset) :y (+ y y-offset)})
-                         (.withForegroundColor TextColor$ANSI/RED)))))
+                         (.withModifier SGR/ITALIC)))))
     (.setCursorPosition screen (TerminalPosition. (- (:x cursor) x-offset)
                                                   (- (:y cursor) y-offset)))))
 
