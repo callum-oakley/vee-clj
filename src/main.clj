@@ -38,7 +38,25 @@
         set-cursor-col-from-x)
     state))
 
-(defn move-line-start [{text :text {y :y x :x} :cursor :as state}]
+;; TODO the word regex will want to be configurable by language
+(def prev-word-re #"(?:[a-zA-Z0-9*+!\-_'?<>=/.:]+|\p{Punct}+)\s*$")
+(def next-word-re #"^(?:[a-zA-Z0-9*+!\-_'?<>=/.:]+|\p{Punct}+|\s+)\s*")
+
+(defn move-prev-word [{text :text {x :x y :y} :cursor :as state}]
+  (if-let [match (re-find prev-word-re (subs (text y) 0 x))]
+    (-> state
+        (update-in [:cursor :x] #(- % (count match)))
+        set-cursor-col-from-x)
+    state))
+
+(defn move-next-word [{text :text {x :x y :y} :cursor :as state}]
+  (if-let [match (re-find next-word-re (subs (text y) x))]
+    (-> state
+        (update-in [:cursor :x] #(+ % (count match)))
+        set-cursor-col-from-x)
+    state))
+
+(defn move-line-start [{text :text {y :y} :cursor :as state}]
   (-> state
       (assoc-in [:cursor :x]
                 (count (re-find #"\s*" (text y))))
@@ -195,7 +213,8 @@
         clamp-cursors-xs)
     (-> state
         (update-in [:text y] str/trimr)
-        annotate)))
+        annotate
+        clamp-cursors-xs)))
 
 (defn set-cursor-style [n]
   ;; https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
@@ -261,7 +280,7 @@
       (loop [x (dec (:x cursor))
              y (:y cursor)]
         (cond
-          (or (and (zero? y) (neg? x)) (< limit (- (:y cursor) y)))
+          (or (and (zero? y) (neg? x)) (> (- (:y cursor) y) limit))
           nil
 
           (neg? x)
@@ -276,7 +295,7 @@
              y (:y cursor)
              pending []]
         (cond
-          (or (and (zero? y) (neg? x)) (< limit (- (:y cursor) y)))
+          (or (and (zero? y) (neg? x)) (> (- (:y cursor) y) limit))
           nil
 
           (neg? x)
@@ -306,11 +325,11 @@
       (loop [x (:x cursor)
              y (:y cursor)]
         (cond
-          (or (and (= (-> text count dec) y) (= (-> y text count) x))
-              (< limit (- y (:y cursor))))
+          (or (and (>= y (-> text count dec)) (>= x (-> y text count)))
+              (> (- y (:y cursor)) limit))
           nil
 
-          (= (-> y text count) x)
+          (>= x (-> y text count))
           (recur 0 (inc y))
 
           (dq? x y)
@@ -322,11 +341,11 @@
              y (:y cursor)
              pending []]
         (cond
-          (or (and (= (-> text count dec) y) (= (-> y text count) x))
-              (< limit (- y (:y cursor))))
+          (or (and (>= y (-> text count dec)) (>= x (-> y text count)))
+              (> (- y (:y cursor)) limit))
           nil
 
-          (= (-> y text count) x)
+          (>= x (-> y text count))
           (recur 0 (inc y) pending)
 
           (or (in-comment? x y)
@@ -334,7 +353,7 @@
               (and (pos? x) (= \\ (char (dec x) y))))
           (recur (inc x) y pending)
 
-          (= (peek pending) (char x y))
+          (and (char x y) (= (peek pending) (char x y)))
           (recur (inc x) y (pop pending))
 
           (#{\( \[ \{} (char x y))
@@ -564,6 +583,10 @@
       (case (.getCharacter input)
         \y (-> state deselect move-open-delim)
         \Y (-> state select move-open-delim)
+        \u (-> state deselect move-prev-word)
+        \U (-> state select move-prev-word)
+        \i (-> state deselect move-next-word)
+        \I (-> state select move-next-word)
         \o (-> state deselect move-close-delim)
         \O (-> state select move-close-delim)
         \h (-> state deselect move-left)
