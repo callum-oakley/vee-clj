@@ -38,7 +38,7 @@
         set-cursor-col-from-x)
     state))
 
-(defn move-line-start [{text :text {y :y} :cursor :as state}]
+(defn move-line-start [{text :text {y :y x :x} :cursor :as state}]
   (-> state
       (assoc-in [:cursor :x]
                 (count (re-find #"\s*" (text y))))
@@ -68,6 +68,44 @@
         (update-in [:cursor :y] inc)
         set-cursor-x-from-col)
     state))
+
+(defn move-prev-paragraph [{:keys [text cursor] :as state}]
+  (loop [y (dec (:y cursor))
+         seen-nonempty? false]
+    (cond
+      (neg? y)
+      (-> state
+          (assoc-in [:cursor :y] 0)
+          set-cursor-x-from-col)
+
+      (and seen-nonempty? (= "" (str/trim (text y))))
+      (-> state
+          (assoc-in [:cursor :y] (inc y))
+          set-cursor-x-from-col)
+
+      (= "" (str/trim (text y)))
+      (recur (dec y) seen-nonempty?)
+
+      :else
+      (recur (dec y) true))))
+
+(defn move-next-paragraph [{:keys [text cursor] :as state}]
+  (loop [y (inc (:y cursor))
+         seen-empty? false]
+    (cond
+      (= y (count text))
+      state
+
+      (and seen-empty? (not= "" (str/trim (text y))))
+      (-> state
+          (assoc-in [:cursor :y] y)
+          set-cursor-x-from-col)
+
+      (= "" (str/trim (text y)))
+      (recur (inc y) true)
+
+      :else
+      (recur (inc y) seen-empty?))))
 
 (defn selection [{:keys [cursor anchor]}]
   (when anchor
@@ -249,7 +287,7 @@
               (and (pos? x) (= \\ (char (dec x) y))))
           (recur (dec x) y pending)
 
-          (= (peek pending) (char x y))
+          (and (char x y) (= (peek pending) (char x y)))
           (recur (dec x) y (pop pending))
 
           (#{\) \] \}} (char x y))
@@ -307,6 +345,22 @@
 
           :else
           (recur (inc x) y pending))))))
+
+(defn move-open-delim [{cursor :cursor :as state}]
+  (if-let [{x :x y :y} (open-delim state cursor 100)]
+    (-> state
+        (assoc-in [:cursor :y] y)
+        (assoc-in [:cursor :x] (inc x))
+        set-cursor-col-from-x)
+    state))
+
+(defn move-close-delim [{cursor :cursor :as state}]
+  (if-let [{x :x y :y} (close-delim state cursor 100)]
+    (-> state
+        (assoc-in [:cursor :y] y)
+        (assoc-in [:cursor :x] x)
+        set-cursor-col-from-x)
+    state))
 
 (defn indent-level [{text :text :as state} y]
   (if-let [{x :x y :y} (open-delim state {:x 0 :y y} 100)]
@@ -508,6 +562,10 @@
       KeyType/Tab (-> state start-change indent trimr stop-change)
       KeyType/Character
       (case (.getCharacter input)
+        \y (-> state deselect move-open-delim)
+        \Y (-> state select move-open-delim)
+        \o (-> state deselect move-close-delim)
+        \O (-> state select move-close-delim)
         \h (-> state deselect move-left)
         \H (-> state select move-left)
         \j (-> state deselect move-down)
@@ -516,10 +574,14 @@
         \K (-> state select move-up)
         \l (-> state deselect move-right)
         \L (-> state select move-right)
-        \y (-> state deselect move-line-start)
-        \Y (-> state select move-line-start)
-        \o (-> state deselect move-line-end)
-        \O (-> state select move-line-end)
+        \n (-> state deselect move-line-start)
+        \N (-> state select move-line-start)
+        \m (-> state deselect move-next-paragraph)
+        \M (-> state select move-next-paragraph)
+        \, (-> state deselect move-prev-paragraph)
+        \< (-> state select move-prev-paragraph)
+        \. (-> state deselect move-line-end)
+        \> (-> state select move-line-end)
         \f (-> state start-change delete start-insert)
         \F (-> state start-change delete-lines start-insert-above)
         \d (-> state start-change delete stop-change)
