@@ -16,6 +16,14 @@
 (defn set-cursor-col-from-x [{{x :x} :cursor :as state}]
   (assoc-in state [:cursor :col] x))
 
+(defn select [{:keys [cursor anchor] :as state}]
+  (if-not anchor
+    (assoc state :anchor cursor)
+    state))
+
+(defn deselect [state]
+  (assoc state :anchor nil))
+
 (defn move-left [{{x :x} :cursor :as state}]
   (if (pos? x)
     (-> state
@@ -62,10 +70,11 @@
     state))
 
 (defn selection [{:keys [cursor anchor]}]
-  (sort-by (juxt :y :x) [cursor anchor]))
+  (when anchor
+    (sort-by (juxt :y :x) [cursor anchor])))
 
 (defn delete [state]
-  (let [[from to] (selection state)]
+  (if-let [[from to] (selection state)]
     (-> state
         (update
          :text
@@ -76,36 +85,45 @@
                        [(str (subs (% (:y from)) 0 (:x from))
                              (subs (% (:y to)) (:x to)))]
                        (subvec % (inc (:y to))))))
-        (assoc :cursor from :anchor from))))
+        (assoc :cursor from :anchor nil))
+    state))
 
-(defn set-anchor-from-cursor [state]
-  (assoc state :anchor (:cursor state)))
-
-(defn delete-lines [{text :text :as state}]
-  (let [[from to] (map :y (selection state))]
+(defn delete-lines [{text :text {y :y} :cursor :as state}]
+  (if-let [[{from :y} {to :y}] (selection state)]
     (-> state
         (update :text #(vec (concat (subvec % 0 from) (subvec % (inc to)))))
         (assoc-in [:cursor :y] (if (= to (dec (count text)))
                                  (dec from)
                                  from))
         set-cursor-x-from-col
-        set-anchor-from-cursor)))
+        (assoc :anchor nil))
+    (-> state
+        (update :text #(vec (concat (subvec % 0 y) (subvec % (inc y)))))
+        (assoc-in [:cursor :y] (if (= y (dec (count text)))
+                                 (dec y)
+                                 y))
+        set-cursor-x-from-col)))
 
 (defn clamp-cursors-xs [{:keys [cursor anchor text] :as state}]
   (let [cursor-x (clamp (:x cursor) 0 (count (text (:y cursor))))
-        anchor-x (clamp (:x anchor) 0 (count (text (:y anchor))))]
+        anchor-x (when anchor (clamp (:x anchor) 0 (count (text (:y anchor)))))]
     (assoc state
            :cursor {:x cursor-x :col cursor-x :y (:y cursor)}
-           :anchor {:x anchor-x :col anchor-x :y (:y anchor)})))
+           :anchor (when anchor {:x anchor-x :col anchor-x :y (:y anchor)}))))
 
-(defn trimr [state]
-  (let [[from to] (map :y (selection state))]
+(defn trimr [{{y :y} :cursor :as state}]
+  (if-let [[{from :y} {to :y}] (selection state)]
     (-> state
         (update :text
                 #(vec (concat (subvec % 0 from)
                               (map str/trimr (subvec % from (inc to)))
                               (subvec % (inc to)))))
-        clamp-cursors-xs)))
+        clamp-cursors-xs)
+    (-> state
+        (update :text
+                #(vec (concat (subvec % 0 y)
+                              [(str/trimr (% y))]
+                              (subvec % (inc y))))))))
 
 (defn set-cursor-style [n]
   ;; https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
@@ -142,7 +160,6 @@
     (-> state
         (update-in [:cursor :x] inc)
         set-cursor-col-from-x
-        set-anchor-from-cursor
         (update :pending-close-delims pop))
 
     (open-delim? char)
@@ -151,15 +168,13 @@
           (update-in [:text y] #(str (subs % 0 x) char close (subs % x)))
           (update-in [:cursor :x] inc)
           set-cursor-col-from-x
-          set-anchor-from-cursor
           (update :pending-close-delims conj close)))
 
     :else
     (-> state
         (update-in [:text y] #(str (subs % 0 x) char (subs % x)))
         (update-in [:cursor :x] inc)
-        set-cursor-col-from-x
-        set-anchor-from-cursor)))
+        set-cursor-col-from-x)))
 
 ;; Cache these -- they're expensive and they only need to change when the text
 ;; changes.
@@ -333,22 +348,22 @@
       (inc x))
     0))
 
-(defn indent [state]
-  (let [[from to] (map :y (selection state))]
-    (reduce
-     (fn [s y]
-       (update
-        s
-        :text
-        #(vec
-          (concat
-           (subvec % 0 y)
-           [(str
-             (apply str (repeat (indent-level % y (annotations %)) \space))
-             (str/trim (% y)))]
-           (subvec % (inc y))))))
-     state
-     (range from (inc to)))))
+(defn indent [{{y :y} :cursor :as state}]
+  (let [indent-line
+        (fn [s y]
+          (update
+           s
+           :text
+           #(vec
+             (concat
+              (subvec % 0 y)
+              [(str
+                (apply str (repeat (indent-level % y (annotations %)) \space))
+                (str/trim (% y)))]
+              (subvec % (inc y))))))]
+    (if-let [[{from :y} {to :y}] (selection state)]
+      (reduce indent-line state (range from (inc to)))
+      (indent-line state y))))
 
 (defn insert-newline [{{x :x y :y} :cursor :as state}]
   (-> state
@@ -359,10 +374,8 @@
                       (subs (% y) x)]
                      (subvec % (inc y)))))
       (assoc-in [:cursor :y] (inc y))
-      set-anchor-from-cursor
       indent
-      move-line-start
-      set-anchor-from-cursor))
+      move-line-start))
 
 (defn start-insert-above [state]
   (-> state
@@ -370,8 +383,7 @@
       (assoc-in [:cursor :x] 0)
       set-cursor-col-from-x
       insert-newline
-      move-up
-      set-anchor-from-cursor))
+      move-up))
 
 (defn insert-backspace [{text :text {x :x y :y} :cursor :as state}]
   (cond
@@ -384,8 +396,7 @@
                                  (subvec % (inc y)))))
                   (assoc :cursor {:x (count (text (dec y)))
                                   :y (dec y)})
-                  set-cursor-col-from-x
-                  set-anchor-from-cursor)
+                  set-cursor-col-from-x)
     :else (-> state
               (update
                :text
@@ -393,8 +404,7 @@
                              [(str (subs (% y) 0 (dec x)) (subs (% y) x))]
                              (subvec % (inc y)))))
               (update-in [:cursor :x] dec)
-              set-cursor-col-from-x
-              set-anchor-from-cursor)))
+              set-cursor-col-from-x)))
 
 (defn insert-delete [{text :text {x :x y :y} :cursor :as state}]
   (cond
@@ -454,7 +464,7 @@
       (slurp r))))
 
 (defn copy [{text :text :as state}]
-  (let [[from to] (selection state)]
+  (when-let [[from to] (selection state)]
     (write-clipboard
      (if (= (:y from) (:y to))
        (subs (text (:y from)) (:x from) (:x to))
@@ -463,9 +473,10 @@
                               [(subs (text (:y to)) 0 (:x to))])))))
   state)
 
-(defn copy-lines [{text :text :as state}]
-  (let [[from to] (map :y (selection state))]
-    (write-clipboard (str (str/join "\n" (subvec text from (inc to))) "\n")))
+(defn copy-lines [{text :text {y :y} :cursor :as state}]
+  (if-let [[{from :y} {to :y}] (selection state)]
+    (write-clipboard (str (str/join "\n" (subvec text from (inc to))) "\n"))
+    (write-clipboard (str (text y) "\n")))
   state)
 
 (defn paste [{{x :x y :y} :cursor :as state}]
@@ -492,22 +503,22 @@
   (case (:mode state)
     :normal
     (condp = (.getKeyType input)
-      KeyType/Escape (set-anchor-from-cursor state)
+      KeyType/Escape (assoc state :anchor nil)
       KeyType/Tab (-> state start-change indent trimr stop-change)
       KeyType/Character
       (case (.getCharacter input)
-        \h (-> state move-left set-anchor-from-cursor)
-        \H (move-left state)
-        \j (-> state move-down set-anchor-from-cursor)
-        \J (move-down state)
-        \k (-> state move-up set-anchor-from-cursor)
-        \K (move-up state)
-        \l (-> state move-right set-anchor-from-cursor)
-        \L (move-right state)
-        \y (-> state move-line-start set-anchor-from-cursor)
-        \Y (move-line-start state)
-        \o (-> state move-line-end set-anchor-from-cursor)
-        \O (move-line-end state)
+        \h (-> state deselect move-left)
+        \H (-> state select move-left)
+        \j (-> state deselect move-down)
+        \J (-> state select move-down)
+        \k (-> state deselect move-up)
+        \K (-> state select move-up)
+        \l (-> state deselect move-right)
+        \L (-> state select move-right)
+        \y (-> state deselect move-line-start)
+        \Y (-> state select move-line-start)
+        \o (-> state deselect move-line-end)
+        \O (-> state select move-line-end)
         \f (-> state start-change delete start-insert)
         \F (-> state start-change delete-lines start-insert-above)
         \d (-> state start-change delete stop-change)
@@ -526,10 +537,10 @@
 
     :insert
     (condp = (.getKeyType input)
-      KeyType/ArrowUp (-> state move-up set-anchor-from-cursor)
-      KeyType/ArrowDown (-> state move-down set-anchor-from-cursor)
-      KeyType/ArrowLeft (-> state move-left set-anchor-from-cursor)
-      KeyType/ArrowRight (-> state move-right set-anchor-from-cursor)
+      KeyType/ArrowUp (move-up state)
+      KeyType/ArrowDown (move-down state)
+      KeyType/ArrowLeft (move-left state)
+      KeyType/ArrowRight (move-right state)
       KeyType/Escape (-> state stop-insert stop-change)
       KeyType/Enter (insert-newline state)
       KeyType/Backspace (insert-backspace state)
@@ -547,13 +558,13 @@
       (stop-space state))))
 
 (defn in-selection? [state x y]
-  (let [[from to] (selection state)]
+  (when-let [[from to] (selection state)]
     (and (or (< (:y from) y) (and (= (:y from) y) (<= (:x from) x)))
          (or (< y (:y to)) (and (= y (:y to)) (< x (:x to)))))))
 
 (defn draw-editor [{:keys [text cursor] :as state} screen w h]
   (let [ans (annotations text)
-        delims (set [(open-delim text cursor ans (int (/ h 2)))
+        delim? (set [(open-delim text cursor ans (int (/ h 2)))
                      (close-delim text cursor ans (int (/ h 2)))])
         {:keys [in-comment? in-string? dq?]} ans
         x-offset (clamp (- (:x cursor) (int (/ w 2)))
@@ -569,7 +580,7 @@
         (.setCharacter screen
                        x y
                        (cond-> (TextCharacter. char)
-                         (delims {:x (+ x x-offset) :y (+ y y-offset)})
+                         (delim? {:x (+ x x-offset) :y (+ y y-offset)})
                          (.withBackgroundColor (TextColor$Indexed. 255))
 
                          (in-selection? state (+ x x-offset) (+ y y-offset))
@@ -616,7 +627,7 @@
   {:file-path file-path
    :text (str/split-lines (slurp file-path))
    :cursor {:x 0 :y 0 :col 0}
-   :anchor {:x 0 :y 0 :col 0}
+   :anchor nil
    :mode :normal
    :past []
    :future []
