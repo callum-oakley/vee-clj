@@ -1,4 +1,4 @@
-(ns main
+(ns vee.main
   (:require
    [clojure.string :as str])
   (:import
