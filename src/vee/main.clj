@@ -719,11 +719,11 @@
              :dirty? false
              :pending-close-delims []}))
 
-(defn main [_]
+(defn -main [& args]
   (with-open [screen (.createScreen (DefaultTerminalFactory.))]
     ;; TODO probably want to addResizeListener to redraw on resize
     (.startScreen screen)
-    (loop [state (initial-state (last *command-line-args*))]
+    (loop [state (initial-state (last args))]
       (draw state screen)
       (when-let [state* (handle-input state (.readInput screen))]
         (recur state*)))))
