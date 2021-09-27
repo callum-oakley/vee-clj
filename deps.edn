@@ -1,2 +1,4 @@
-{:deps
- {com.googlecode.lanterna/lanterna {:mvn/version "3.1.1"}}}
+{:paths ["src"]
+ :deps {com.googlecode.lanterna/lanterna {:mvn/version "3.1.1"}}
+
+ :aliases {:run {:main-opts ["-m" "vee.main"]}}}
